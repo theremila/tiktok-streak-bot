@@ -1,0 +1,10 @@
+[
+  {
+    "name": "sessionid",
+    "value": "SESSION",
+    "domain": ".tiktok.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true
+  }
+]

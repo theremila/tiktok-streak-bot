@@ -1,0 +1,22 @@
+services:
+  tiktok-streak-bot:
+    build: .
+    container_name: tiktok-streak-bot
+    restart: unless-stopped
+    shm_size: '2gb'
+    volumes:
+      - ./data/cookies.json:/app/cookies.json:ro
+      - ./data/config.json:/app/config.json:ro
+      - ./data:/app/data
+      - wdm-cache:/root/.wdm
+    environment:
+      - TZ=UTC
+      - WDM_LOG=0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  wdm-cache:

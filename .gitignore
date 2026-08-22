@@ -1,0 +1,12 @@
+data/cookies.json
+data/config.json
+data/*.txt
+data/*.png
+cookies.json
+config.json
+*.log
+venv/
+__pycache__/
+.pytest_cache/
+/tmp/
+.DS_Store

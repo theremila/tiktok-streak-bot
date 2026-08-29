@@ -39,6 +39,23 @@ docker compose run --rm tiktok-streak-bot python -u main.py --test
 Stop the scheduler with `docker compose down`. Cookie files and local configuration
 are intentionally not committed.
 
+## TikTok session cookies
+
+The bot uses an existing TikTok browser session. It does not need your TikTok
+password, but `data/cookies.json` grants access to that session: never commit it,
+publish it, or send it to anyone.
+
+1. Install the Cookie-Editor extension in a Chromium-based browser.
+2. Open `https://www.tiktok.com/messages?lang=en`, sign in, and make sure your
+   conversations are visible.
+3. Open Cookie-Editor and export the full TikTok cookie set as JSON.
+4. Replace `data/cookies.json` with that JSON and run `docker compose up -d`.
+
+Use the entire exported JSON array, not a single copied token. The bot expects a
+`sessionid` cookie and reads the name, value, domain, path, and secure flag from
+each entry. Cookie-Editor metadata such as expiry or SameSite is safe to keep.
+When TikTok expires the session, export a new cookie set and replace the file.
+
 ## Remote install and removal
 
 The scripts run from your own computer and deploy through SSH. They accept command

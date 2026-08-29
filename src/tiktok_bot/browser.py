@@ -1,85 +1,68 @@
-import os
-import shutil
-import platform
-import logging
+"""Short-lived, resource-constrained Chromium driver."""
+
+from __future__ import annotations
+
+import tempfile
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
 from selenium import webdriver
 
-SESSION_DIR = "/tmp/chrome_session_tiktok"
-IS_WINDOWS = platform.system() == "Windows"
 
-def get_chrome_binary():
-    candidates = [
+def _chrome_binary() -> str | None:
+    for candidate in (
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
         "/usr/bin/chromium",
-        "/usr/bin/chromium-browser"
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
+        "/usr/bin/chromium-browser",
+    ):
+        if Path(candidate).is_file():
+            return candidate
     return None
 
-def terminate_lingering_processes():
-    try:
-        if IS_WINDOWS:
-            os.system("taskkill /F /IM chromedriver.exe /T > NUL 2>&1")
-            os.system("taskkill /F /IM chrome.exe /T > NUL 2>&1")
-        else:
-            os.system("pkill -9 -f chromedriver > /dev/null 2>&1")
-            os.system("pkill -9 -f chromium > /dev/null 2>&1")
-            os.system("pkill -9 -f chrome > /dev/null 2>&1")
-    except Exception:
-        pass
 
 @contextmanager
-def managed_webdriver(user_agent: str, headless: bool = True):
-    opts = webdriver.ChromeOptions()
-    opts.page_load_strategy = "eager"
-    
-    if headless:
-        opts.add_argument("--headless=new")
-        
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--disable-images")
-    opts.add_argument("--blink-settings=imagesEnabled=false")
-    opts.add_argument("--disable-extensions")
-    opts.add_argument("--disable-background-networking")
-    opts.add_argument("--renderer-process-limit=1")
-    opts.add_argument("--js-flags=--max-old-space-size=256")
-    opts.add_argument("--window-size=1440,900")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument(f"--user-agent={user_agent}")
-    opts.add_argument("--log-level=3")
-    opts.add_argument(f"--user-data-dir={SESSION_DIR}")
+def managed_webdriver(user_agent: str, headless: bool = True) -> Iterator[webdriver.Chrome]:
+    """Start Chromium for one dispatch cycle and release only its resources."""
+    with tempfile.TemporaryDirectory(prefix="tiktok-streak-") as profile_dir:
+        options = webdriver.ChromeOptions()
+        options.page_load_strategy = "eager"
+        if headless:
+            options.add_argument("--headless=new")
 
-    bin_loc = get_chrome_binary()
-    if bin_loc:
-        opts.binary_location = bin_loc
+        for argument in (
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-default-apps",
+            "--disable-component-update",
+            "--disable-features=Translate,MediaRouter",
+            "--blink-settings=imagesEnabled=false",
+            "--renderer-process-limit=1",
+            "--js-flags=--max-old-space-size=256",
+            "--window-size=1440,900",
+            "--disable-blink-features=AutomationControlled",
+            "--log-level=3",
+            f"--user-data-dir={profile_dir}",
+            f"--user-agent={user_agent}",
+        ):
+            options.add_argument(argument)
 
-    driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(35)
-    driver.set_script_timeout(15)
+        if binary := _chrome_binary():
+            options.binary_location = binary
 
-    try:
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        })
-    except Exception:
-        pass
-
-    try:
-        yield driver
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        terminate_lingering_processes()
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(35)
+        driver.set_script_timeout(15)
         try:
-            shutil.rmtree(SESSION_DIR, ignore_errors=True)
-        except Exception:
-            pass
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+            )
+            yield driver
+        finally:
+            driver.quit()

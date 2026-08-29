@@ -1,19 +1,15 @@
-import os
 import json
 import time
 import logging
+from pathlib import Path
 
-def inject_cookies(driver, cookie_file: str) -> bool:
-    actual_path = cookie_file if os.path.exists(cookie_file) else os.path.join("data", cookie_file)
-    if not os.path.exists(actual_path):
-        actual_path = "cookies.json"
-
-    if not os.path.exists(actual_path):
-        logging.error(f"Cookie file not found: '{cookie_file}'")
+def inject_cookies(driver, cookie_file: Path) -> bool:
+    if not cookie_file.is_file():
+        logging.error("Cookie file not found: '%s'", cookie_file)
         return False
 
     try:
-        with open(actual_path, "r", encoding="utf-8") as f:
+        with cookie_file.open("r", encoding="utf-8") as f:
             cookies = json.load(f)
 
         driver.get("https://www.tiktok.com/explore")

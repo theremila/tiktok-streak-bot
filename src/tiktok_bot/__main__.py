@@ -1,12 +1,14 @@
 import sys
 import time
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta
 
 from .config import BotConfig
 from .bot import StreakBot
 
-def setup_logging(log_filename: str):
+def setup_logging(log_filename: Path):
+    log_filename.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -17,7 +19,12 @@ def setup_logging(log_filename: str):
     )
 
 def main():
-    config = BotConfig.load()
+    try:
+        config = BotConfig.load()
+    except (FileNotFoundError, ValueError) as error:
+        logging.basicConfig(level=logging.ERROR, format="%(levelname)s - %(message)s")
+        logging.error("Invalid bot configuration: %s", error)
+        return 2
     setup_logging(config.log_filename)
 
     bot = StreakBot(config)

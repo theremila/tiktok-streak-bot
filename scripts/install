@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+destination=${TIKTOK_BOT_DESTINATION:-/opt/tiktok-streak-bot}
+ssh_port=${TIKTOK_BOT_SSH_PORT:-22}
+ssh_user=${TIKTOK_BOT_SSH_USER:-root}
+timezone=${TIKTOK_BOT_TIMEZONE:-UTC}
+ssh_host=${TIKTOK_BOT_SSH_HOST:-}
+ssh_password=${TIKTOK_BOT_SSH_PASSWORD:-}
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/install --host HOST [options]
+
+Installs or updates the Docker Compose deployment over SSH. Existing config.json
+and cookies.json on the server are backed up and retained.
+
+Options:
+  --host HOST          Server address (required)
+  --port PORT          SSH port (default: 22)
+  --user USER          SSH user (default: root)
+  --password PASSWORD  SSH password; avoid shell history by using TIKTOK_BOT_SSH_PASSWORD
+  --destination PATH   Remote directory (default: /opt/tiktok-streak-bot)
+  --timezone ZONE      Container timezone (default: UTC)
+  -h, --help           Show this help
+
+Environment equivalents: TIKTOK_BOT_SSH_HOST, TIKTOK_BOT_SSH_PORT,
+TIKTOK_BOT_SSH_USER, TIKTOK_BOT_SSH_PASSWORD, TIKTOK_BOT_DESTINATION,
+TIKTOK_BOT_TIMEZONE.
+EOF
+}
+
+while (($#)); do
+    case $1 in
+        --host) ssh_host=${2:?Missing host}; shift 2 ;;
+        --port) ssh_port=${2:?Missing port}; shift 2 ;;
+        --user) ssh_user=${2:?Missing user}; shift 2 ;;
+        --password) ssh_password=${2:?Missing password}; shift 2 ;;
+        --destination) destination=${2:?Missing destination}; shift 2 ;;
+        --timezone) timezone=${2:?Missing timezone}; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+read_value() {
+    local prompt=$1 variable=$2 value
+    [[ -n ${!variable} ]] && return
+    read -r -p "$prompt: " value
+    printf -v "$variable" '%s' "$value"
+}
+
+read_value 'Server address' ssh_host
+read_value 'SSH port' ssh_port
+read_value 'SSH user' ssh_user
+read_value 'Remote directory' destination
+read_value 'Container timezone (for example Europe/Kaliningrad)' timezone
+
+if [[ -z $ssh_password && ! -t 0 ]]; then
+    printf 'Set TIKTOK_BOT_SSH_PASSWORD or use an SSH key in non-interactive mode.\n' >&2
+    exit 2
+fi
+if [[ -z $ssh_password ]]; then
+    read -r -s -p 'SSH password (leave empty to use SSH key): ' ssh_password
+    printf '\n'
+fi
+
+ssh_command=(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -p "$ssh_port" "$ssh_user@$ssh_host")
+if [[ -n $ssh_password ]]; then
+    command -v sshpass >/dev/null || { printf 'sshpass is required for password authentication.\n' >&2; exit 1; }
+    ssh_command=(sshpass -p "$ssh_password" "${ssh_command[@]}")
+fi
+
+"${ssh_command[@]}" '
+set -eu
+
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then
+        root_command=
+    elif command -v sudo >/dev/null 2>&1; then
+        root_command=sudo
+    else
+        printf "Docker installation requires root or sudo access.\\n" >&2
+        exit 1
+    fi
+
+    . /etc/os-release
+    case "$ID" in
+        debian|ubuntu) ;;
+        *) printf "Unsupported distribution: %s\\n" "$ID" >&2; exit 1 ;;
+    esac
+
+    $root_command apt-get update -qq
+    $root_command apt-get install -y -qq ca-certificates curl gnupg
+    $root_command install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/$ID/gpg" | $root_command gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    $root_command chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" | $root_command tee /etc/apt/sources.list.d/docker.list >/dev/null
+    $root_command apt-get update -qq
+    $root_command apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    $root_command systemctl enable --now docker
+fi
+
+docker compose version
+' || {
+    printf 'Could not prepare Docker Compose on the server.\n' >&2
+    exit 1
+}
+
+printf 'Uploading application to %s:%s ...\n' "$ssh_host" "$destination"
+tar --exclude-vcs --exclude='data/config.json' --exclude='data/cookies.json' --exclude='data/*.log' -czf - . \
+    | "${ssh_command[@]}" "set -eu
+        target='$destination'
+        stamp=\$(date -u +%Y%m%dT%H%M%SZ)
+        mkdir -p \"\$target/data\" \"\$target/backups\"
+        for file in config.json cookies.json; do
+            if [ -f \"\$target/data/\$file\" ]; then
+                cp -p \"\$target/data/\$file\" \"\$target/backups/\${stamp}-\$file\"
+            fi
+        done
+        tar -xzf - -C \"\$target\"
+        cd \"\$target\"
+        test -f data/config.json || cp data/config.example.json data/config.json
+        test -f data/cookies.json || cp data/cookies.example.json data/cookies.json
+        TZ='$timezone' docker compose up -d --build
+        printf 'Installed at %s\\n' \"\$target\"
+        printf 'Place TikTok cookies in %s/data/cookies.json before the first cycle.\\n' \"\$target\""

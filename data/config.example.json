@@ -1,25 +1,10 @@
 {
-  "TEST_MODE": false,
-  "TARGET_USERS": [
-    "username_1",
-    "username_2"
-  ],
-  "USER_ALIASES": {
-    "username_1": [
-      "nickname_1",
-      "Display Name 1"
-    ],
-    "username_2": [
-      "nickname_2",
-      "Display Name 2"
-    ]
-  },
-  "MESSAGE_TO_SEND": "Сквирта не существует",
+  "MESSAGE_TO_SEND": "🔥",
   "TARGET_SEND_TIME_HM": [
     12,
     0
   ],
   "COOKIES_FILE": "cookies.json",
-  "LOG_FILENAME": "data/tiktok_bot.txt",
-  "HEADLESS_MODE": true
+  "LOG_FILENAME": "data/tiktok_bot.log",
+  "TEST_MODE": false
 }

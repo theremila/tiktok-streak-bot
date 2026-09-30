@@ -90,7 +90,7 @@ def jar(path):
         if item.get("name") in COOKIES and item.get("value") is not None
     }
 
-def fill_env(folder=None):
+def fill_env(folder=None, cookie_path=None):
     folder = Path(folder or ROOT)
     path = folder / ".env"
     data = read_env(path)
@@ -99,28 +99,38 @@ def fill_env(folder=None):
         data["STREAK_MESSAGE"] = "streak"
     if not any(k.startswith("TIKTOK_") and not data.get(k) for k in KEYS):
         return data, False
-    cookie_path = None
-    candidate_paths = [
-        folder / "data" / "cookies.json",
-        folder / "cookies.json",
-        Path("data/cookies.json"),
-        Path("cookies.json"),
-        *folder.glob("*.json"),
-        *folder.glob("data/*.json"),
-    ]
-    for p in candidate_paths:
-        if not p.is_file():
-            continue
-        try:
-            raw = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "name" in raw[0]:
-            cookie_path = p
-            break
-    if not cookie_path:
+    target_path = None
+    if cookie_path:
+        cp = Path(cookie_path)
+        if not cp.is_absolute():
+            for base in (Path.cwd(), folder, folder / "data"):
+                if (base / cp).is_file():
+                    target_path = base / cp
+                    break
+        elif cp.is_file():
+            target_path = cp
+    if not target_path:
+        candidate_paths = [
+            folder / "data" / "cookies.json",
+            folder / "cookies.json",
+            Path("data/cookies.json"),
+            Path("cookies.json"),
+            *folder.glob("*.json"),
+            *folder.glob("data/*.json"),
+        ]
+        for p in candidate_paths:
+            if not p.is_file():
+                continue
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "name" in raw[0]:
+                target_path = p
+                break
+    if not target_path:
         return data, False
-    bag = jar(cookie_path)
+    bag = jar(target_path)
     changed = False
     for cname, ekey in COOKIES.items():
         if bag.get(cname) and not data.get(ekey):
@@ -130,9 +140,9 @@ def fill_env(folder=None):
         write_env(path, data)
     return data, changed
 
-def load_env(folder=None):
+def load_env(folder=None, cookie_path=None):
     folder = Path(folder or ROOT)
-    data, _ = fill_env(folder)
+    data, _ = fill_env(folder, cookie_path=cookie_path)
     data.update(read_env(folder / ".env"))
     if data.get("streak_message") and not data.get("STREAK_MESSAGE"):
         data["STREAK_MESSAGE"] = data.get("streak_message") or ""
@@ -292,7 +302,7 @@ class Auth:
     def close(self):
         self.client.close()
 
-def load_auth(folder=None):
+def load_auth(folder=None, cookie_path=None):
     folder = Path(folder or ROOT)
-    load_env(folder)
+    load_env(folder, cookie_path=cookie_path)
     return Auth(cookies=jar_env())

@@ -1,86 +1,64 @@
 # TikTok Streak Bot
 
-Small scheduled TikTok DM sender. It keeps only the Python scheduler alive while
-waiting; Chromium starts for a dispatch cycle and is closed immediately after it.
+Automated TikTok streak keeper and message dispatcher using TikTok's Protobuf API.
 
 ## Behaviour
 
-- Uses one short-lived, headless Chromium instance per cycle.
-- Creates an isolated temporary browser profile and removes it on exit.
-- Leaves unrelated Chrome and ChromeDriver processes untouched.
-- Injects an exported TikTok cookie session and sends a message to each configured recipient.
-- Runs once with `--test`; otherwise it waits for the daily configured time.
-
-The idle container is intentionally lightweight. Browser memory is needed only while
-TikTok is open; it cannot be reduced to the idle footprint without replacing the
-browser-based automation approach.
+- Queries streak status, expiration countdowns, and restorable state from `/tiktok/v1/im/streaks/get`.
+- Sends configured streak messages via `/v1/message/send` when an active streak requires maintenance.
+- Automatically restores lost streaks via `/tiktok/v1/im/streaks/restore` if streak restores are available.
+- Evaluates pending actions once and exits with `--oneshot`; runs a continuous daily scheduler otherwise.
+- Dispatches configured messages immediately to all streak contacts when invoked with `--force`.
+- Keeps session tokens in memory during execution without writing credentials to `.env` files.
 
 ## Run with Docker Compose
 
 ```bash
-git clone https://github.com/evaware-dev/tiktok-streak-bot.git
+git clone https://github.com/theremila/tiktok-streak-bot.git
 cd tiktok-streak-bot
 cp data/config.example.json data/config.json
-# Export your own TikTok cookies to data/cookies.json.
+# Export your TikTok cookies into data/cookies.json
 docker compose up -d --build
-docker compose logs -f
 ```
 
-The service runs in the timezone configured by `TZ` in
-[docker-compose.yml](docker-compose.yml). Set it to the intended local timezone
-before starting the container.
+The service runs in the timezone configured by `TZ` in [docker-compose.yml](docker-compose.yml). Set it to the intended local timezone before starting the container.
 
 To run a single cycle deliberately:
 
 ```bash
-docker compose run --rm tiktok-streak-bot python -u main.py --test
+docker compose run --rm tiktok-streak-bot python -u main.py --oneshot
 ```
 
-Stop the scheduler with `docker compose down`. Cookie files and local configuration
-are intentionally not committed.
+To force-send a streak message to all active streak contacts immediately:
+
+```bash
+docker compose run --rm tiktok-streak-bot python -u main.py --force
+```
+
+Stop the scheduler with `docker compose down`.
 
 ## TikTok session cookies
 
-The bot uses an existing TikTok browser session. It does not need your TikTok
-password, but `data/cookies.json` grants access to that session: never commit it,
-publish it, or send it to anyone.
+The bot authenticates using an exported TikTok browser session and does not need account passwords. Because `data/cookies.json` grants direct session access: never commit it, publish it, or send it to anyone.
 
-1. Install the Cookie-Editor extension in a Chromium-based browser.
-2. Open `https://www.tiktok.com/messages?lang=en`, sign in, and make sure your
-   conversations are visible.
-3. Open Cookie-Editor and export the full TikTok cookie set as JSON.
-4. Replace `data/cookies.json` with that JSON and run `docker compose up -d`.
+1. Open `https://www.tiktok.com/messages?lang=en` in a desktop browser and ensure conversations load.
+2. Export the full TikTok cookie set as a JSON array using an extension such as Cookie-Editor.
+3. Save the exported JSON array to `data/cookies.json`.
 
-Use the entire exported JSON array, not a single copied token. The bot expects a
-`sessionid` cookie and reads the name, value, domain, path, and secure flag from
-each entry. Cookie-Editor metadata such as expiry or SameSite is safe to keep.
-When TikTok expires the session, export a new cookie set and replace the file.
+The bot extracts `sessionid`, `msToken`, `ttwid`, and verification tokens directly from this file. When TikTok expires the session, export a new cookie set and replace `data/cookies.json`.
 
 ## Remote install and removal
 
-The scripts run from your own computer and deploy through SSH. They accept command
-line arguments and prompt only for missing values. For password authentication,
-either enter it without echoing or provide `TIKTOK_BOT_SSH_PASSWORD`; SSH keys work
-without `sshpass`.
+The scripts run from your local machine and deploy over SSH:
 
 ```bash
-scripts/install --host 203.0.113.10 --port 22 --user root \
-  --timezone Europe/Kaliningrad
-
+scripts/install --host 203.0.113.10 --port 22 --user root --timezone Europe/Kaliningrad
 scripts/uninstall --host 203.0.113.10 --port 22 --user root
 ```
 
-The same values can be supplied with `TIKTOK_BOT_SSH_HOST`,
-`TIKTOK_BOT_SSH_PORT`, `TIKTOK_BOT_SSH_USER`, `TIKTOK_BOT_SSH_PASSWORD`,
-`TIKTOK_BOT_DESTINATION`, and `TIKTOK_BOT_TIMEZONE`.
+Parameters can also be supplied via environment variables: `TIKTOK_BOT_SSH_HOST`, `TIKTOK_BOT_SSH_PORT`, `TIKTOK_BOT_SSH_USER`, `TIKTOK_BOT_SSH_PASSWORD`, `TIKTOK_BOT_DESTINATION`, and `TIKTOK_BOT_TIMEZONE`.
 
-`install` preserves `data/config.json` and `data/cookies.json` already present on
-the server and copies timestamped backups into `backups/`. On a fresh server it
-creates both files from the safe examples before starting Docker. On Debian and
-Ubuntu, it installs Docker Engine and the Compose plugin when they are missing; the
-remote account must therefore be `root` or have passwordless/interactive `sudo`.
-`uninstall` stops the bot but deliberately retains its directory and private data.
-Use `--purge` only when the whole remote installation should be deleted.
+Existing `data/config.json` and `data/cookies.json` files on the server are preserved across updates and backed up into `backups/`. `uninstall` stops the bot but retains private data. Use `--purge` to delete the remote installation directory entirely.
 
 ## Configuration
 
@@ -88,31 +66,19 @@ Create `data/config.json` from [data/config.example.json](data/config.example.js
 
 ```json
 {
-  "TARGET_USERS": ["friend_1", "friend_2"],
-  "USER_ALIASES": {
-    "friend_1": ["Display Name 1"]
-  },
-  "MESSAGE_TO_SEND": "Сквирта не существует",
+  "MESSAGE_TO_SEND": "🔥",
   "TARGET_SEND_TIME_HM": [12, 0],
   "COOKIES_FILE": "cookies.json",
   "LOG_FILENAME": "data/tiktok_bot.log",
-  "HEADLESS_MODE": true
+  "TEST_MODE": false
 }
 ```
 
-`TARGET_SEND_TIME_HM` is `[hour, minute]` in the container timezone. A recipient
-is sent to once per cycle even if it appears multiple times in `TARGET_USERS`.
-`USER_ALIASES` supplies alternative names when TikTok's UI does not expose the
-username directly. `TEST_MODE: true` has the same one-shot behaviour as `--test`.
-
-The application fails clearly when the configuration file is absent or malformed;
-it never writes a replacement file with placeholder users.
-
-## Layout
-
-- [src/tiktok_bot](src/tiktok_bot) — configuration, scheduler, browser lifecycle, and TikTok UI actions.
-- [data](data) — configuration and cookie templates.
-- [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml) — the supported deployment.
+- `MESSAGE_TO_SEND`: message text sent to maintain active streaks.
+- `TARGET_SEND_TIME_HM`: `[hour, minute]` scheduled trigger time in the container timezone.
+- `COOKIES_FILE`: path to the cookie file relative to `data/` or the project root.
+- `LOG_FILENAME`: destination log file path.
+- `TEST_MODE`: when set to `true`, executes a single cycle and exits immediately.
 
 ## License
 

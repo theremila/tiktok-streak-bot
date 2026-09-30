@@ -108,7 +108,7 @@ docker compose version
 }
 
 printf 'Uploading application to %s:%s ...\n' "$ssh_host" "$destination"
-tar --exclude-vcs --exclude='data/config.json' --exclude='data/cookies.json' --exclude='data/*.log' -czf - . \
+tar --exclude-vcs --exclude='data/config.json' --exclude='data/cookies.json' --exclude='data/*.log' --exclude='data/*.txt' --exclude='data/*.png' -czf - . \
     | "${ssh_command[@]}" "set -eu
         target='$destination'
         stamp=\$(date -u +%Y%m%dT%H%M%SZ)

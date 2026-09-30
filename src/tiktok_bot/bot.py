@@ -13,7 +13,7 @@ class StreakBot:
         if isinstance(config, Auth):
             auth, config = config, None
         self.config = config or (BotConfig.load() if Path("data/config.json").exists() else BotConfig())
-        self.auth = auth or load_auth()
+        self.auth = auth or load_auth(cookie_path=self.config.cookies_file)
         self.streaks = Streaks(self.auth)
         self.inbox = Inbox(self.auth)
         self.msg = self.config.message_to_send or env("STREAK_MESSAGE", "🔥")

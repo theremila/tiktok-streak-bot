@@ -14,7 +14,7 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 MESSAGES_URL = "https://www.tiktok.com/messages?lang=en"
-DEFAULT_MESSAGE = "Сквирта не существует"
+DEFAULT_MESSAGE = "🔥"
 
 @dataclass
 class BotConfig:

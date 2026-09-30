@@ -2,8 +2,7 @@ services:
   tiktok-streak-bot:
     build: .
     container_name: tiktok-streak-bot
-    command: ["python", "-u", "main.py", "--oneshot"]
-    restart: "no"
+    restart: unless-stopped
     volumes:
       - ./data:/app/data
       - ./data/cookies.json:/app/cookies.json:ro

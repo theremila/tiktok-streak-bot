@@ -13,4 +13,4 @@ COPY main.py .
 
 RUN mkdir -p /app/data
 
-CMD ["python", "-u", "main.py", "--oneshot"]
+CMD ["python", "-u", "main.py"]

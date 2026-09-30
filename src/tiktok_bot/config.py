@@ -49,7 +49,11 @@ class BotConfig:
 
 def _read_json_object(path: Path) -> dict[str, Any]:
     if not path.is_file():
-        raise FileNotFoundError(f"Configuration file not found: {path}")
+        example = path.parent / "config.example.json"
+        if example.is_file():
+            path = example
+        else:
+            return {}
     with path.open(encoding="utf-8") as config_file:
         data = json.load(config_file)
     if not isinstance(data, dict):

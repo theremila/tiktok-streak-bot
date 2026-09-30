@@ -29,9 +29,10 @@ def main():
 
     bot = StreakBot(config)
 
-    if config.test_mode or "--test" in sys.argv:
-        logging.info("Running in immediate execution mode (--test).")
-        bot.run_cycle()
+    force = "--force" in sys.argv
+    if config.test_mode or "--test" in sys.argv or "--oneshot" in sys.argv or force:
+        logging.info("Running in immediate execution mode (--oneshot).")
+        bot.run_cycle(force=force)
         return
 
     logging.info(f"Service running in scheduled mode. Daily target: {config.target_send_time.strftime('%H:%M')}")

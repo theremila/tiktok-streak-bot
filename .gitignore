@@ -8,5 +8,7 @@ config.json
 venv/
 __pycache__/
 .pytest_cache/
-/tmp/
+.env
+*.env
 .DS_Store
+

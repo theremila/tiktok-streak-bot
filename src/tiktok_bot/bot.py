@@ -1,92 +1,98 @@
-import time
-import random
 import logging
-from typing import Optional
+import time
+from typing import Optional, Callable
+from pathlib import Path
 
+from .auth import Auth, load_auth, env
+from .streak import Streaks, as_code, SEND, RESTORE, NUDGE
+from .messaging import Inbox
 from .config import BotConfig
-from .browser import managed_webdriver
-from .cookies import inject_cookies
-from .messaging import find_and_open_chat, dispatch_message
-
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 5
 
 class StreakBot:
-    def __init__(self, config: Optional[BotConfig] = None):
-        self.config = config or BotConfig.load()
+    def __init__(self, config: Optional[BotConfig] = None, auth: Optional[Auth] = None):
+        if isinstance(config, Auth):
+            auth, config = config, None
+        self.config = config or (BotConfig.load() if Path("data/config.json").exists() else BotConfig())
+        self.auth = auth or load_auth()
+        self.streaks = Streaks(self.auth)
+        self.inbox = Inbox(self.auth)
+        self.msg = self.config.message_to_send or env("STREAK_MESSAGE", "🔥")
+        self.ok_at = {}
+        self.fail = {}
 
-    def run_cycle(self) -> int:
-        logging.info("=== Starting TikTok Streak Dispatch Cycle ===")
-        success_count = 0
+    def ready(self) -> str:
+        if not self.auth.ok_sess():
+            return "no session"
+        if not self.auth.login():
+            return "bad session"
+        return ""
+
+    def run_oneshot(self, note: Callable[[str], None] = logging.info, force: bool = False) -> int:
+        status = self.ready()
+        if status:
+            note(f"Authentication failed: {status}")
+            return 0
+
+        user_info = self.auth.user
+        who = user_info.get("username") or user_info.get("id") or "?"
+        note(f"Authenticated as @{who}")
 
         try:
-            with managed_webdriver(user_agent=self.config.user_agent, headless=self.config.headless_mode) as driver:
-                logging.info("Browser instance initialized.")
-
-                if not inject_cookies(driver, self.config.cookies_file):
-                    raise RuntimeError("Failed to load and inject session cookies.")
-
-                logging.info(f"Navigating to {self.config.tiktok_messages_url}...")
-                driver.get(self.config.tiktok_messages_url)
-                time.sleep(random.uniform(3.0, 5.0))
-
-                if not self.config.target_users:
-                    logging.error("No target users configured.")
-                    return 0
-
-                # Deduplicate recipients
-                seen = set()
-                targets = []
-                for u in self.config.target_users:
-                    norm = u.lower().strip()
-                    if norm not in seen:
-                        seen.add(norm)
-                        targets.append(u)
-
-                logging.info(f"Targeting {len(targets)} recipient(s): {', '.join(targets)}")
-
-                for user in targets:
-                    safe_user = "".join(c for c in user if c.isprintable())
-                    aliases = self.config.user_aliases.get(user, [])
-                    sent = False
-
-                    for attempt in range(1, MAX_RETRIES + 1):
-                        logging.info(f"--- Recipient: '{safe_user}' (attempt {attempt}/{MAX_RETRIES}) ---")
-
-                        if attempt > 1:
-                            try:
-                                driver.get(self.config.tiktok_messages_url)
-                                time.sleep(2.5)
-                            except Exception:
-                                pass
-
-                        if not find_and_open_chat(driver, user, aliases=aliases):
-                            logging.warning(f"✗ Conversation not found for '{safe_user}'.")
-                            if attempt < MAX_RETRIES:
-                                time.sleep(RETRY_DELAY_SECONDS)
-                            continue
-
-                        if dispatch_message(driver, self.config.message_to_send):
-                            sent = True
-                            break
-
-                        logging.warning(f"✗ Message dispatch failed for '{safe_user}'.")
-                        if attempt < MAX_RETRIES:
-                            time.sleep(RETRY_DELAY_SECONDS)
-
-                    if sent:
-                        success_count += 1
-                        logging.info(f"✓ Message delivered to '{safe_user}'.")
-                    else:
-                        logging.error(f"✗ Delivery failed for '{safe_user}'.")
-
-                    if len(targets) > 1 and user != targets[-1]:
-                        wait = random.uniform(2.5, 4.5)
-                        time.sleep(wait)
-
-                logging.info(f"=== Streak Cycle Finished: {success_count}/{len(targets)} messages delivered ===")
-                return success_count
-
+            rows = self.streaks.fetch()
         except Exception as e:
-            logging.error(f"Critical error during streak cycle: {e}")
-            return success_count
+            note(f"Failed to fetch streaks: {e}")
+            return 0
+
+        note(f"Found {len(rows)} streak contact(s).")
+
+        if force:
+            note(f"Force dispatch enabled. Sending '{self.msg}' to all {len(rows)} streak contacts...")
+            action_count = 0
+            for row in rows:
+                uid = str(row.get("id") or "")
+                note(f"Sending to {uid} ({row.get('streak')}d, status={row.get('status')})...")
+                res = self.inbox.send(uid, self.msg, row.get("conversation_id") or "", row.get("conv_type") or 1)
+                if res.get("ok"):
+                    note(f"✓ Message delivered to {uid}")
+                    self.streaks.touch(uid)
+                    action_count += 1
+                else:
+                    note(f"✗ Delivery failed for {uid}: {res.get('msg')}")
+                time.sleep(1.5)
+            note(f"Force dispatch completed: {action_count}/{len(rows)} messages delivered.")
+            return action_count
+
+        due_items = self.streaks.due()
+        note(f"{len(due_items)} streak(s) require action right now.")
+
+        action_count = 0
+        for item in due_items:
+            row = item["row"]
+            uid = str(row.get("id") or "")
+            for act in item["acts"]:
+                if act == RESTORE:
+                    note(f"Restoring lost streak for {uid}...")
+                    res = self.streaks.restore(uid)
+                    if res.get("ok"):
+                        note(f"✓ Restored streak for {uid}")
+                        action_count += 1
+                    else:
+                        note(f"✗ Restore failed for {uid}: {res.get('msg')}")
+                elif act in (SEND, NUDGE):
+                    text = self.msg if act == SEND else f"{self.msg}?"
+                    note(f"Sending streak message ({act}) to {uid}...")
+                    res = self.inbox.send(uid, text, row.get("conversation_id") or "", row.get("conv_type") or 1)
+                    if res.get("ok"):
+                        note(f"✓ Message delivered to {uid}")
+                        self.streaks.touch(uid)
+                        action_count += 1
+                    else:
+                        note(f"✗ Delivery failed for {uid}: {res.get('msg')}")
+                time.sleep(1.5)
+
+        note(f"Streak cycle completed: {action_count} actions performed.")
+        return action_count
+
+    def run_cycle(self, force: bool = False) -> int:
+        """Alias for compatibility with existing runner."""
+        return self.run_oneshot(force=force)

@@ -1,9 +1,12 @@
 import json
+import re
 import time
 import uuid
+import httpx
 from .auth import Auth
+from .im_signing import sign_request
 
-API = "https://api.tiktokv.com"
+API = "https://im-api-sg.tiktok.com"
 INIT = f"{API}/v2/message/get_by_user_init"
 SEND = f"{API}/v1/message/send"
 SKIP = ("rate", "limit", "banned", "forbid", "block", "spam", "risk", "verify")
@@ -44,6 +47,7 @@ def _pb(buf):
     i = 0
     while i < len(buf):
         key = shift = 0
+        b = 0x80
         while i < len(buf):
             b = buf[i]
             i += 1
@@ -51,9 +55,16 @@ def _pb(buf):
             if not b & 0x80:
                 break
             shift += 7
+            if shift >= 70:
+                raise ValueError("oversized protobuf key")
+        if b & 0x80:
+            raise ValueError("truncated protobuf key")
         f, w = key >> 3, key & 7
+        if f == 0:
+            raise ValueError("invalid protobuf field")
         if w == 0:
             val = shift = 0
+            b = 0x80
             while i < len(buf):
                 b = buf[i]
                 i += 1
@@ -61,9 +72,14 @@ def _pb(buf):
                 if not b & 0x80:
                     break
                 shift += 7
+                if shift >= 70:
+                    raise ValueError("oversized protobuf value")
+            if b & 0x80:
+                raise ValueError("truncated protobuf value")
             out.setdefault(f, []).append(val)
         elif w == 2:
             n = shift = 0
+            b = 0x80
             while i < len(buf):
                 b = buf[i]
                 i += 1
@@ -71,6 +87,10 @@ def _pb(buf):
                 if not b & 0x80:
                     break
                 shift += 7
+                if shift >= 70:
+                    raise ValueError("oversized protobuf length")
+            if b & 0x80 or n > len(buf) - i:
+                raise ValueError("truncated protobuf field")
             out.setdefault(f, []).append(buf[i : i + n])
             i += n
         elif w == 1:
@@ -78,7 +98,9 @@ def _pb(buf):
         elif w == 5:
             i += 4
         else:
-            break
+            raise ValueError("unsupported protobuf wire type")
+        if i > len(buf):
+            raise ValueError("truncated protobuf fixed field")
     return out
 
 def _one(d, k, default=None):
@@ -98,37 +120,96 @@ class Inbox:
         self.auth = auth or Auth()
         self.last = {}
         self.convs = {}
-        self.seq = int(time.time() * 1000) % 2147483647
+        self.context = {}
 
-    def _seq(self):
-        self.seq = (self.seq + 1) % 2147483647
-        return self.seq
+    def _context(self):
+        if self.context:
+            return self.context
+        response = self.auth.client.get(
+            "https://www.tiktok.com/messages?lang=en",
+            headers=self.auth.headers({"Accept": "text/html"}),
+        )
+        response.raise_for_status()
+        match = re.search(
+            r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+            response.text, re.S,
+        )
+        if not match:
+            raise ValueError("messages page context unavailable")
+        context = json.loads(match.group(1)).get("__DEFAULT_SCOPE__", {}).get("webapp.app-context", {})
+        wid = context.get("wid")
+        if not isinstance(wid, str) or not wid.isascii() or not wid.isdigit():
+            raise ValueError("messages page device ID unavailable")
+        self.context = context
+        return context
 
-    def _pack(self, cmd, field, body):
+    def _params(self):
+        params = {"aid": "1988", "version_code": "1.0.0",
+                  "app_name": "tiktok_web", "device_platform": "web_pc"}
+        if self.auth.cookies.get("msToken"):
+            params["msToken"] = self.auth.cookies["msToken"]
+        return params
+
+    def resolve_username(self, username: str) -> str:
+        username = username.removeprefix("@")
+        if not re.fullmatch(r"[A-Za-z0-9._]{1,24}", username):
+            raise ValueError("invalid username")
+        response = self.auth.client.get(f"https://www.tiktok.com/@{username}")
+        response.raise_for_status()
+        match = re.search(
+            r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+            response.text, re.S,
+        )
+        if not match:
+            raise ValueError("profile data unavailable")
+        profile = json.loads(match.group(1)).get("__DEFAULT_SCOPE__", {}).get(
+            "webapp.user-detail", {}
+        ).get("userInfo", {}).get("user", {})
+        uid = str(profile.get("id") or "")
+        if str(profile.get("uniqueId") or "").casefold() != username.casefold() or not uid.isascii() or not uid.isdigit():
+            raise ValueError("profile does not match username")
+        return uid
+
+    def _pack(self, cmd, field, body, guard=None):
+        context = self._context()
+        metadata = self.auth.params()
+        metadata.pop("X-Bogus", None)
+        metadata.pop("msToken", None)
+        metadata.update({"channel": "web", "device_id": context["wid"],
+                         "region": str(context.get("region") or ""),
+                         "priority_region": str(context.get("region") or ""),
+                         "referer": "https://www.tiktok.com/messages",
+                         "user_is_login": "true", "from_appID": "1988",
+                         "user_agent": self.auth.base()["User-Agent"]})
+        if self.auth.cookies.get("msToken"):
+            metadata["Web-Sdk-Ms-Token"] = self.auth.cookies["msToken"]
+        if guard:
+            metadata.update(guard)
+        group = cmd == 100 and _one(_pb(body), 2) == 2
         return b"".join(
             [
                 _vi(1, cmd),
-                _vi(2, self._seq()),
-                _str(3, "1.2.0"),
+                _vi(2, (10014 if group else 10009) if cmd == 100 else 10002),
+                _str(3, "1.6.0"),
                 _str(4, ""),
-                _vi(6, 0),
+                _vi(5, 3),
+                _vi(6, int(group)),
+                _str(7, ""),
                 _ld(8, _ld(field, body)),
-                _str(9, self.auth.did()),
-                _str(10, "tiktok_web"),
+                _str(9, context["wid"]),
                 _str(11, "web"),
-                _kv(15, "aid", "1988"),
-                _kv(15, "app_name", "tiktok_web"),
-                _kv(15, "device_platform", "web"),
+                *(_kv(15, k, v) for k, v in metadata.items()),
+                _vi(18, 1),
             ]
         )
 
     def load(self, force=False):
         if self.convs and not force:
             return self.convs
-        body = _vi(1, 0) + _vi(2, 0) + _vi(3, 0) + _vi(4, 1)
+        body = _vi(1, 0)
         r = self.auth.client.post(
             INIT,
-            params=self.auth.params(),
+            params=self._params(),
             content=self._pack(203, 203, body),
             headers=self.auth.headers(HDR),
         )
@@ -139,19 +220,20 @@ class Inbox:
             return self.convs
         inner = _pb(_one(_pb(_one(env, 6, b"") or b""), 203, b"") or b"")
         out = {}
-        for chunk in inner.get(2) or []:
-            if not isinstance(chunk, (bytes, bytearray)):
-                continue
-            c = _pb(chunk)
-            cid = _txt(_one(c, 1, b""))
-            if not cid:
-                continue
-            out[cid] = {
-                "cid": cid,
-                "short": int(_one(c, 2) or 0),
-                "type": int(_one(c, 3) or 1),
-                "ticket": _txt(_one(c, 4, b"")) or "deprecated",
-            }
+        for field in (2, 1):
+            for chunk in inner.get(field) or []:
+                if not isinstance(chunk, (bytes, bytearray)):
+                    continue
+                c = _pb(chunk)
+                cid = _txt(_one(c, 1, b""))
+                if not cid or cid in out:
+                    continue
+                out[cid] = {
+                    "cid": cid,
+                    "short": int(_one(c, 2 if field == 2 else 5) or 0),
+                    "type": int(_one(c, 3 if field == 2 else 2) or 1),
+                    "ticket": "deprecated",
+                }
         self.convs = out
         return out
 
@@ -161,11 +243,10 @@ class Inbox:
         ctype = int(ctype or 1)
         my = str(self.auth.user.get("id") or "")
         if ctype == 2 and cid:
-            short = int(cid) if cid.isdigit() else 0
             self.load()
             if cid in self.convs:
                 return self.convs[cid]
-            return {"cid": cid, "short": short, "type": 2, "ticket": "deprecated"}
+            return None
         self.load()
         want = [x for x in (cid, f"0:1:{peer}:{my}", f"0:1:{my}:{peer}") if x]
         for key in want:
@@ -175,8 +256,6 @@ class Inbox:
         for key in want:
             if key in self.convs:
                 return self.convs[key]
-        if my and peer:
-            return {"cid": f"0:1:{peer}:{my}", "short": 0, "type": 1, "ticket": "deprecated"}
         return None
 
     def send(self, peer, text, conversation_id="", conv_type=1):
@@ -194,9 +273,8 @@ class Inbox:
         if not info:
             return {"ok": False, "code": -4, "msg": "no conv", "skip": False}
         mid = str(uuid.uuid4())
-        now = int(time.time() * 1000)
         content = json.dumps(
-            {"mention_users": [], "aweType": 0, "richTextInfos": [], "text": text},
+            {"aweType": 0, "text": text},
             separators=(",", ":"),
         )
         body = b"".join(
@@ -206,45 +284,79 @@ class Inbox:
                 _vi(3, info["short"]),
                 _str(4, content),
                 _kv(5, "s:client_message_id", mid),
-                _kv(5, "s:stime", str(now)),
                 _kv(5, "s:mentioned_users", ""),
                 _vi(6, 7),
                 _str(7, info["ticket"]),
                 _str(8, mid),
             ]
         )
+        public_key, proof = sign_request(SEND)
+        guard = {"tt-ticket-guard-public-key": public_key,
+                 "tt-ticket-guard-client-data": "",
+                 "tt-ticket-guard-version": "2",
+                 "tt-ticket-guard-iteration-version": "0",
+                 "tt-ticket-guard-web-version": "1"}
+        params = self._params()
+        params.update({"ztca-version": "1", "ztca-dpop": proof})
         try:
             r = self.auth.client.post(
                 SEND,
-                params=self.auth.params(),
-                content=self._pack(100, 100, body),
-                headers=self.auth.headers(HDR),
+                params=params,
+                content=self._pack(100, 100, body, guard),
+                headers=self.auth.headers({**HDR, **guard}),
+                follow_redirects=False,
             )
-        except Exception as e:
-            out = {"ok": False, "code": -1, "msg": f"network error: {e}", "skip": False}
+        except httpx.HTTPError:
+            out = {"ok": False, "code": -1, "msg": "network error; delivery unknown", "skip": False}
             self.last[peer or cid] = {"at": int(time.time()), **out, "text": text}
             return out
         if r.status_code in (401, 403):
             out = {"ok": False, "code": -3, "msg": "login", "skip": False}
             self.last[peer or cid] = {"at": int(time.time()), **out, "text": text}
             return out
-        if not r.content:
-            out = {"ok": False, "code": -7, "msg": "API response invalid", "skip": False}
-            self.last[peer or cid] = {"at": int(time.time()), **out, "text": text}
-            return out
+        response_details = {
+            "http_status": r.status_code,
+            "response_bytes": len(r.content),
+        }
         try:
+            if not r.content:
+                raise ValueError("empty response")
             env = _pb(r.content)
             raw = _one(env, 3)
-            if raw is None:
-                code = int(r.status_code)
-            else:
-                code = int(raw)
+            message_id = ""
+            for field in (6, 8):
+                payload = _one(env, field, b"")
+                if not isinstance(payload, bytes):
+                    continue
+                response_body = _one(_pb(payload), 100, b"")
+                if not isinstance(response_body, bytes):
+                    continue
+                value = _one(_pb(response_body), 1)
+                candidate = _txt(value)
+                if candidate.isascii() and candidate.isdigit() and int(candidate) > 0:
+                    message_id = candidate
+                    break
+            if raw is None and message_id:
+                raw = 0
+            if type(raw) is not int:
+                raise ValueError("missing or invalid IM status")
+            code = raw
         except (TypeError, ValueError):
-            out = {"ok": False, "code": -7, "msg": "API response invalid", "skip": False}
+            out = {
+                "ok": False, "code": -7, "msg": "API response invalid",
+                "skip": False,
+                "reason": "empty_response" if not r.content else "invalid_acknowledgement",
+                **response_details,
+            }
             self.last[peer or cid] = {"at": int(time.time()), **out, "text": text}
             return out
         msg = _txt(_one(env, 4)) or f"http {r.status_code}"
         skip = any(x in msg.lower() for x in SKIP) or code in (2154, 3002325, 3002282)
-        out = {"ok": code == 0 or msg == "OK", "code": code, "msg": msg, "skip": skip}
+        out = {
+            "ok": r.status_code == 200 and code in (0, 200) and bool(message_id) and not skip,
+            "code": code, "msg": msg, "skip": skip, **response_details,
+            "message_id": message_id,
+            "reason": "acknowledged" if message_id else "missing_message_id",
+        }
         self.last[peer or cid] = {"at": int(time.time()), **out, "text": text}
         return out

@@ -8,6 +8,9 @@ from .config import BotConfig
 from .bot import StreakBot
 
 def setup_logging(log_filename: Path):
+    # HTTP request URLs include session tokens in their query strings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     log_filename.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,

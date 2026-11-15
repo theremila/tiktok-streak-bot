@@ -4,8 +4,11 @@ Automated TikTok streak keeper and message dispatcher using TikTok's Protobuf AP
 
 ## Behaviour
 
+- With `TARGET_USERS` configured, each cycle sends once to every exact username in that list, independently of streak status. Display names and aliases are not used. Failed or ambiguous profile resolution never falls back to another recipient.
+- With no targets configured, the legacy streak-maintenance behaviour below is used.
 - Queries streak status, expiration countdowns, and restorable state from `/tiktok/v1/im/streaks/get`.
 - Sends configured streak messages via `/v1/message/send` when an active streak requires maintenance.
+- Uses an in-project HTTP/Protobuf client with request-bound signatures; no browser or third-party TikTok client is required. Sending requires an existing conversation, and success requires a server-assigned message ID.
 - Automatically restores lost streaks via `/tiktok/v1/im/streaks/restore` if streak restores are available.
 - Evaluates pending actions once and exits with `--oneshot`; runs a continuous daily scheduler otherwise.
 - Dispatches configured messages immediately to all streak contacts when invoked with `--force`.
@@ -67,6 +70,7 @@ Create `data/config.json` from [data/config.example.json](data/config.example.js
 ```json
 {
   "MESSAGE_TO_SEND": "🔥",
+  "TARGET_USERS": ["example_username"],
   "TARGET_SEND_TIME_HM": [12, 0],
   "COOKIES_FILE": "cookies.json",
   "LOG_FILENAME": "data/tiktok_bot.log",
@@ -75,6 +79,7 @@ Create `data/config.json` from [data/config.example.json](data/config.example.js
 ```
 
 - `MESSAGE_TO_SEND`: message text sent to maintain active streaks.
+- `TARGET_USERS`: exact TikTok usernames (optional leading `@`), not display names. With a nonempty list, both scheduled and immediate cycles send to these targets; `--force` does not expand the recipient list.
 - `TARGET_SEND_TIME_HM`: `[hour, minute]` scheduled trigger time in the container timezone.
 - `COOKIES_FILE`: path to the cookie file relative to `data/` or the project root.
 - `LOG_FILENAME`: destination log file path.

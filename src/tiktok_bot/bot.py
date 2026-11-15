@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Optional, Callable
 from pathlib import Path
+import httpx
 
 from .auth import Auth, load_auth, env
 from .streak import Streaks, as_code, SEND, RESTORE, NUDGE
@@ -27,6 +28,32 @@ class StreakBot:
             return "bad session"
         return ""
 
+    def send_targets(self, note: Callable[[str], None] = logging.info) -> int:
+        accepted = 0
+        for username in self.config.target_users:
+            try:
+                uid = self.inbox.resolve_username(username)
+                result = self.inbox.send(uid, self.msg)
+            except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+                note(f"Could not resolve/send @{username}; not retried.")
+                time.sleep(1.5)
+                continue
+            if result.get("ok"):
+                accepted += 1
+                note(f"API accepted message for @{username}")
+            else:
+                note(
+                    f"Send failed for @{username}: code={result.get('code')} "
+                    f"http={result.get('http_status')} bytes={result.get('response_bytes')} "
+                    f"reason={result.get('reason', 'platform_response')}"
+                )
+            if result.get("skip") or result.get("code") == -3:
+                note("Dispatch stopped: platform restriction or expired session.")
+                break
+            time.sleep(1.5)
+        note(f"Target dispatch completed: {accepted}/{len(self.config.target_users)} API accepted.")
+        return accepted
+
     def run_oneshot(self, note: Callable[[str], None] = logging.info, force: bool = False) -> int:
         status = self.ready()
         if status:
@@ -36,6 +63,9 @@ class StreakBot:
         user_info = self.auth.user
         who = user_info.get("username") or user_info.get("id") or "?"
         note(f"Authenticated as @{who}")
+
+        if self.config.target_users:
+            return self.send_targets(note)
 
         try:
             rows = self.streaks.fetch()

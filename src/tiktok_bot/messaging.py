@@ -8,6 +8,7 @@ from .im_signing import sign_request
 
 API = "https://im-api-sg.tiktok.com"
 INIT = f"{API}/v2/message/get_by_user_init"
+MAX_INIT_PAGES = 30  # safety cap on conversation-list pages (~10 conversations each)
 SEND = f"{API}/v1/message/send"
 SKIP = ("rate", "limit", "banned", "forbid", "block", "spam", "risk", "verify")
 HDR = {
@@ -206,36 +207,44 @@ class Inbox:
     def load(self, force=False):
         if self.convs and not force:
             return self.convs
-        body = _vi(1, 0)
-        r = self.auth.client.post(
-            INIT,
-            params=self._params(),
-            content=self._pack(203, 203, body),
-            headers=self.auth.headers(HDR),
-        )
-        if r.status_code != 200 or not r.content:
-            return self.convs
-        env = _pb(r.content)
-        if _one(env, 3) not in (0, None) and _txt(_one(env, 4)) != "OK":
-            return self.convs
-        inner = _pb(_one(_pb(_one(env, 6, b"") or b""), 203, b"") or b"")
+        # get_by_user_init is paginated (~10 conversations per page). Response field 4 is the
+        # next cursor and field 5 is has_more; without paging, older chats/groups are never found.
         out = {}
-        for field in (2, 1):
-            for chunk in inner.get(field) or []:
-                if not isinstance(chunk, (bytes, bytearray)):
-                    continue
-                c = _pb(chunk)
-                cid = _txt(_one(c, 1, b""))
-                if not cid or cid in out:
-                    continue
-                out[cid] = {
-                    "cid": cid,
-                    "short": int(_one(c, 2 if field == 2 else 5) or 0),
-                    "type": int(_one(c, 3 if field == 2 else 2) or 1),
-                    "ticket": "deprecated",
-                }
-        self.convs = out
-        return out
+        cursor = 0
+        for _ in range(MAX_INIT_PAGES):
+            r = self.auth.client.post(
+                INIT,
+                params=self._params(),
+                content=self._pack(203, 203, _vi(1, cursor)),
+                headers=self.auth.headers(HDR),
+            )
+            if r.status_code != 200 or not r.content:
+                break
+            env = _pb(r.content)
+            if _one(env, 3) not in (0, None) and _txt(_one(env, 4)) != "OK":
+                break
+            inner = _pb(_one(_pb(_one(env, 6, b"") or b""), 203, b"") or b"")
+            for field in (2, 1):
+                for chunk in inner.get(field) or []:
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        continue
+                    c = _pb(chunk)
+                    cid = _txt(_one(c, 1, b""))
+                    if not cid or cid in out:
+                        continue
+                    out[cid] = {
+                        "cid": cid,
+                        "short": int(_one(c, 2 if field == 2 else 5) or 0),
+                        "type": int(_one(c, 3 if field == 2 else 2) or 1),
+                        "ticket": "deprecated",
+                    }
+            nxt, more = _one(inner, 4), _one(inner, 5)
+            if not more or nxt is None or nxt == cursor:
+                break
+            cursor = nxt
+        if out:
+            self.convs = out
+        return self.convs
 
     def _conv(self, peer, cid="", ctype=1):
         peer = str(peer or "")
@@ -244,9 +253,9 @@ class Inbox:
         my = str(self.auth.user.get("id") or "")
         if ctype == 2 and cid:
             self.load()
-            if cid in self.convs:
-                return self.convs[cid]
-            return None
+            if cid not in self.convs:
+                self.load(force=True)
+            return self.convs.get(cid)
         self.load()
         want = [x for x in (cid, f"0:1:{peer}:{my}", f"0:1:{my}:{peer}") if x]
         for key in want:
